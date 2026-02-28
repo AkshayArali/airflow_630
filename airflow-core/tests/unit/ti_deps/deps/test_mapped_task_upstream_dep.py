@@ -154,7 +154,31 @@ def test_mapped_task_upstream_dep(
     assert ti.state == expected_state
 
 
-@pytest.mark.quarantined  # FIXME: https://github.com/apache/airflow/issues/38955
+@pytest.mark.quarantined
+# Quarantine rationale (630:P1 analysis — see docs/reviews/PR-5-self-review.md):
+#
+# Root cause of flakiness (https://github.com/apache/airflow/issues/38955):
+#   The test re-uses a `schedulable_tis` dict captured from a *previous*
+#   scheduling-decision iteration.  After `t2_a.run()` (which may raise
+#   AirflowFailException), `_one_scheduling_decision_iteration` is called
+#   but in the UPSTREAM_FAILED branch the return value is discarded (line 234).
+#   The subsequent `schedulable_tis["t3"].run()` / `schedulable_tis["t4"].run()`
+#   therefore operate on a stale snapshot.  Whether the old TI references are
+#   still valid depends on SQLAlchemy session state, which varies across runs.
+#
+# What would fix it:
+#   Always capture the return value of _one_scheduling_decision_iteration and
+#   re-fetch t3/t4 from the *latest* schedulable_tis dict.  This eliminates
+#   the dependency on stale ORM objects.  A secondary improvement would be to
+#   call `session.expire_all()` between iterations so that no cached state
+#   from a prior flush leaks into the next assertion.
+#
+# Why it stays quarantined for now:
+#   The fix requires modifying the control flow of the test, which touches
+#   multiple parametrized branches and interacts with the scheduler's
+#   task_instance_scheduling_decisions() internals.  A safe fix needs careful
+#   review against all 12 parametrized combinations (3 failure_modes × 2
+#   skip_upstream × 2 testcases).
 @pytest.mark.parametrize("failure_mode", [None, FAILED, UPSTREAM_FAILED])
 @pytest.mark.parametrize("skip_upstream", [True, False])
 @pytest.mark.parametrize("testcase", ["task", "group"])
