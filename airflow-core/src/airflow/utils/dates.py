@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import calendar
 
+MICROSECONDS_PER_SECOND = 1_000_000
+NANOSECONDS_PER_SECOND = 1_000_000_000
+
 cron_presets: dict[str, str] = {
     "@hourly": "0 * * * *",
     "@daily": "0 0 * * *",
@@ -34,9 +37,9 @@ def datetime_to_nano(datetime) -> int | None:
     if datetime:
         if datetime.tzinfo is None:
             # There is no timezone info, handle it the same as UTC.
-            timestamp = calendar.timegm(datetime.timetuple()) + datetime.microsecond / 1e6
+            timestamp = calendar.timegm(datetime.timetuple()) + datetime.microsecond / MICROSECONDS_PER_SECOND
         else:
             # The datetime is timezone-aware. Use timestamp directly.
             timestamp = datetime.timestamp()
-        return int(timestamp * 1e9)
+        return int(timestamp * NANOSECONDS_PER_SECOND)
     return None
