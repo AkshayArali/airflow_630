@@ -23,7 +23,7 @@ import uuid
 from base64 import urlsafe_b64encode
 from collections.abc import Callable, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Final, Literal, overload
 
 import attrs
 import httpx
@@ -41,6 +41,17 @@ if TYPE_CHECKING:
     from jwt.algorithms import AllowedKeys, AllowedPrivateKeys
 
 log = structlog.get_logger(logger_name=__name__)
+
+# Configuration lookup names for JWT signing (section/key strings; not secret values).
+_API_AUTH_CONFIG_SECTION: Final[str] = "api_auth"
+#: Airflow configuration section name for API authentication (not a credential string).
+_JWT_SECRET_CONFIG_KEY: Final[str] = "jwt_secret"
+#: Configuration key name for the JWT shared secret (lookup only; not the secret value).
+
+# ``load_pem_private_key`` password for unencrypted PEM material (always None here; not user credentials).
+_PEM_UNENCRYPTED_KEY_PASSWORD: Final[bytes | None] = None
+#: Password argument for unencrypted PEM keys; always ``None`` in this codebase.
+
 
 __all__ = [
     "InvalidClaimError",
@@ -367,7 +378,7 @@ def _pem_to_key(pem_data: str | bytes | AllowedPrivateKeys) -> AllowedPrivateKey
         # Assume it's already a key object
         return pem_data
 
-    return load_pem_private_key(pem_data, password=None)  # type: ignore[return-value]
+    return load_pem_private_key(pem_data, password=_PEM_UNENCRYPTED_KEY_PASSWORD)  # type: ignore[return-value]
 
 
 def _load_key_from_configured_file() -> AllowedPrivateKeys | None:
@@ -567,7 +578,7 @@ def get_signing_args(make_secret_key_if_needed: bool = True) -> dict[str, Any]:
         return {"private_key": priv}
 
     # Don't call this unless we have to as it might issue a warning
-    return {"secret_key": get_signing_key("api_auth", "jwt_secret", make_secret_key_if_needed)}
+    return {"secret_key": get_signing_key(_API_AUTH_CONFIG_SECTION, _JWT_SECRET_CONFIG_KEY, make_secret_key_if_needed)}
 
 
 def get_sig_validation_args(make_secret_key_if_needed: bool = True) -> dict[str, Any]:
@@ -591,4 +602,4 @@ def get_sig_validation_args(make_secret_key_if_needed: bool = True) -> dict[str,
             "algorithm": conf.get("api_auth", "jwt_algorithm", fallback=None) or _guess_best_algorithm(key),
         }
 
-    return {"secret_key": get_signing_key("api_auth", "jwt_secret", make_secret_key_if_needed)}
+    return {"secret_key": get_signing_key(_API_AUTH_CONFIG_SECTION, _JWT_SECRET_CONFIG_KEY, make_secret_key_if_needed)}
