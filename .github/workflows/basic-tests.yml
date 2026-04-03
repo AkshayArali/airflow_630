@@ -76,10 +76,10 @@ on:  # yamllint disable-line rule:truthy
         description: 'Platform for the build - linux/amd64 or linux/arm64'
         required: true
         type: string
-permissions:
-  contents: read
 jobs:
   run-breeze-tests:
+    permissions:
+      contents: read
     timeout-minutes: 10
     name: Breeze unit tests
     runs-on: ${{ fromJSON(inputs.runners) }}
@@ -98,6 +98,8 @@ jobs:
         run: uv tool run --from apache-airflow-breeze pytest -n auto --color=yes
         working-directory: ./dev/breeze/
   run-breeze-integration-tests:
+    permissions:
+      contents: read
     timeout-minutes: 120
     name: Breeze integration tests
     runs-on: ${{ fromJSON(inputs.runners) }}
@@ -125,6 +127,8 @@ jobs:
         run: uv tool run --from apache-airflow-breeze pytest -v --color=yes -m integration_tests
         working-directory: ./dev/breeze/
   tests-shared-distributions:
+    permissions:
+      contents: read
     timeout-minutes: 10
     name: Shared ${{ matrix.shared-distribution }} tests
     strategy:
@@ -146,6 +150,8 @@ jobs:
         run: uv run --group dev pytest --color=yes -n auto
         working-directory: shared/${{ matrix.shared-distribution }}
   tests-ui:
+    permissions:
+      contents: read
     timeout-minutes: 15
     name: React UI tests
     runs-on: ${{ fromJSON(inputs.runners) }}
@@ -212,6 +218,8 @@ jobs:
         if: steps.restore-eslint-cache-simple-am-ui.outputs.stash-hit != 'true'
 
   check-translation-completness:
+    permissions:
+      contents: read
     timeout-minutes: 15
     name: "Check translation completeness"
     runs-on: ${{ fromJSON(inputs.runners) }}
@@ -229,6 +237,8 @@ jobs:
   # Do not touch any of the python code or any of the important files that might require building
   # The CI Docker image and they can be run entirely using the prek virtual environments on host
   static-checks-basic-checks-only:
+    permissions:
+      contents: read
     timeout-minutes: 30
     name: "Static checks: basic checks only"
     runs-on: ${{ fromJSON(inputs.runners) }}
@@ -268,6 +278,8 @@ jobs:
           COLUMNS: "202"
 
   test-git-clone-on-windows:
+    permissions:
+      contents: read
     timeout-minutes: 5
     name: "Test git clone on Windows"
     runs-on: ["windows-2025"]
@@ -279,6 +291,8 @@ jobs:
           persist-credentials: false
 
   upgrade-check:
+    permissions:
+      contents: read
     timeout-minutes: 45
     name: "Upgrade checks"
     runs-on: ${{ fromJSON(inputs.runners) }}
@@ -361,6 +375,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   test-airflow-release-commands:
+    permissions:
+      contents: read
     timeout-minutes: 80
     name: "Test Airflow release commands"
     runs-on: ${{ fromJSON(inputs.runners) }}
@@ -415,6 +431,8 @@ jobs:
 
 
   test-airflow-standalone:
+    permissions:
+      contents: read
     timeout-minutes: 30
     name: "Test Airflow standalone commands"
     runs-on: ${{ fromJSON(inputs.runners) }}
