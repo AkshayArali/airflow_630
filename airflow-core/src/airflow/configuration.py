@@ -21,9 +21,7 @@ import logging
 import os
 import pathlib
 import re
-import shlex
 import stat
-import subprocess
 import sys
 import warnings
 from base64 import b64encode
@@ -49,6 +47,7 @@ from airflow.exceptions import AirflowConfigException, RemovedInAirflow4Warning
 from airflow.secrets import DEFAULT_SECRETS_SEARCH_PATH
 from airflow.task.weight_rule import WeightRule
 from airflow.utils import yaml
+from airflow.utils.command_runner import run_command as _run_command
 
 if TYPE_CHECKING:
     from airflow.api_fastapi.auth.managers.base_auth_manager import BaseAuthManager
@@ -135,18 +134,7 @@ def expand_env_var(env_var: str | None) -> str | None:
 
 def run_command(command: str) -> str:
     """Run command and returns stdout."""
-    process = subprocess.Popen(
-        shlex.split(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE, close_fds=True
-    )
-    output, stderr = (stream.decode(sys.getdefaultencoding(), "ignore") for stream in process.communicate())
-
-    if process.returncode != 0:
-        raise AirflowConfigException(
-            f"Cannot execute {command}. Error code is: {process.returncode}. "
-            f"Output: {output}, Stderr: {stderr}"
-        )
-
-    return output
+    return _run_command(command)
 
 
 def _default_config_file_path(file_name: str) -> str:
