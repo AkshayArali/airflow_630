@@ -172,6 +172,24 @@ class SimpleAuthManager(BaseAuthManager[SimpleAuthManagerUser]):
     def serialize_user(self, user: SimpleAuthManagerUser) -> dict[str, Any]:
         return {"sub": user.username, "role": user.role, "teams": user.teams}
 
+    def _is_authorized_op_resource_with_viewer_read(
+        self,
+        *,
+        method: ResourceMethod,
+        user: SimpleAuthManagerUser,
+    ) -> bool:
+        """
+        Check authorization for resources where reads need VIEWER+ and writes need OP+.
+
+        Shared by configuration, asset, and asset_alias authorization (S4144 duplicate bodies).
+        """
+        return self._is_authorized(
+            method=method,
+            allow_get_role=SimpleAuthManagerRole.VIEWER,
+            allow_role=SimpleAuthManagerRole.OP,
+            user=user,
+        )
+
     def is_authorized_configuration(
         self,
         *,
@@ -179,12 +197,7 @@ class SimpleAuthManager(BaseAuthManager[SimpleAuthManagerUser]):
         user: SimpleAuthManagerUser,
         details: ConfigurationDetails | None = None,
     ) -> bool:
-        return self._is_authorized(
-            method=method,
-            allow_get_role=SimpleAuthManagerRole.VIEWER,
-            allow_role=SimpleAuthManagerRole.OP,
-            user=user,
-        )
+        return self._is_authorized_op_resource_with_viewer_read(method=method, user=user)
 
     def is_authorized_connection(
         self,
@@ -223,12 +236,7 @@ class SimpleAuthManager(BaseAuthManager[SimpleAuthManagerUser]):
         user: SimpleAuthManagerUser,
         details: AssetDetails | None = None,
     ) -> bool:
-        return self._is_authorized(
-            method=method,
-            allow_get_role=SimpleAuthManagerRole.VIEWER,
-            allow_role=SimpleAuthManagerRole.OP,
-            user=user,
-        )
+        return self._is_authorized_op_resource_with_viewer_read(method=method, user=user)
 
     def is_authorized_asset_alias(
         self,
@@ -237,12 +245,7 @@ class SimpleAuthManager(BaseAuthManager[SimpleAuthManagerUser]):
         user: SimpleAuthManagerUser,
         details: AssetAliasDetails | None = None,
     ) -> bool:
-        return self._is_authorized(
-            method=method,
-            allow_get_role=SimpleAuthManagerRole.VIEWER,
-            allow_role=SimpleAuthManagerRole.OP,
-            user=user,
-        )
+        return self._is_authorized_op_resource_with_viewer_read(method=method, user=user)
 
     def is_authorized_pool(
         self,
