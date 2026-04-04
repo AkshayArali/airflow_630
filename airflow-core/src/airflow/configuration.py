@@ -69,6 +69,14 @@ ConfigSourcesType = dict[str, ConfigSectionSourcesType]
 
 ENV_VAR_PREFIX = "AIRFLOW__"
 
+_DEPRECATED_LOG_FILENAME_TEMPLATE_LEGACY = (
+    "dag_id={{ ti.dag_id }}/run_id={{ ti.run_id }}/task_id={{ ti.task_id }}/"
+    "{% if ti.map_index >= 0 %}map_index={{ ti.map_index }}/{% endif %}attempt={{ try_number }}.log"
+)
+_DEPRECATED_VALUES_PLACEHOLDER = "XX-set-after-default-config-loaded-XX"
+_DEPRECATED_EXECUTOR_SEQUENTIAL = "SequentialExecutor"
+_DEPRECATED_EXECUTOR_LOCAL = "LocalExecutor"
+
 
 class _SecretKeys:
     """Holds the secret keys used in Airflow during runtime."""
@@ -264,17 +272,16 @@ class AirflowConfigParser(_SharedAirflowConfigParser):
     deprecated_values: dict[str, dict[str, tuple[Pattern, str]]] = {
         "logging": {
             "log_filename_template": (
-                re.compile(
-                    re.escape(
-                        "dag_id={{ ti.dag_id }}/run_id={{ ti.run_id }}/task_id={{ ti.task_id }}/{% if ti.map_index >= 0 %}map_index={{ ti.map_index }}/{% endif %}attempt={{ try_number }}.log"
-                    )
-                ),
+                re.compile(re.escape(_DEPRECATED_LOG_FILENAME_TEMPLATE_LEGACY)),
                 # The actual replacement value will be updated after defaults are loaded from config.yml
-                "XX-set-after-default-config-loaded-XX",
+                _DEPRECATED_VALUES_PLACEHOLDER,
             ),
         },
         "core": {
-            "executor": (re.compile(re.escape("SequentialExecutor")), "LocalExecutor"),
+            "executor": (
+                re.compile(re.escape(_DEPRECATED_EXECUTOR_SEQUENTIAL)),
+                _DEPRECATED_EXECUTOR_LOCAL,
+            ),
         },
     }
 
