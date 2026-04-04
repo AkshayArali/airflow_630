@@ -19,6 +19,10 @@ from __future__ import annotations
 
 import calendar
 
+# Floating-point factors used when converting between datetime components and Unix timestamps.
+_MICROSECONDS_PER_SECOND = 1e6
+_NANOSECONDS_PER_SECOND = 1e9
+
 cron_presets: dict[str, str] = {
     "@hourly": "0 * * * *",
     "@daily": "0 0 * * *",
@@ -34,9 +38,9 @@ def datetime_to_nano(datetime) -> int | None:
     if datetime:
         if datetime.tzinfo is None:
             # There is no timezone info, handle it the same as UTC.
-            timestamp = calendar.timegm(datetime.timetuple()) + datetime.microsecond / 1e6
+            timestamp = calendar.timegm(datetime.timetuple()) + datetime.microsecond / _MICROSECONDS_PER_SECOND
         else:
             # The datetime is timezone-aware. Use timestamp directly.
             timestamp = datetime.timestamp()
-        return int(timestamp * 1e9)
+        return int(timestamp * _NANOSECONDS_PER_SECOND)
     return None
