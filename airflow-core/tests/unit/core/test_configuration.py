@@ -73,6 +73,13 @@ def restore_env():
         yield
 
 
+def test_expand_env_var_detects_circular_reference(monkeypatch):
+    monkeypatch.setenv("AIRFLOW_CIRC_A", "$AIRFLOW_CIRC_B")
+    monkeypatch.setenv("AIRFLOW_CIRC_B", "$AIRFLOW_CIRC_A")
+    with pytest.raises(AirflowConfigException, match="circular"):
+        expand_env_var("$AIRFLOW_CIRC_A")
+
+
 @pytest.fixture(scope="module", autouse=True)
 def restore_providers_manager_configuration():
     yield
