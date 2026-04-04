@@ -45,6 +45,20 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+_MULTI_TEAM_UNCONFIGURED_TASK_READ_MSG = (
+    "Multi-team mode is not configured in the Airflow environment but the task trying to access the variable belongs to a team"
+)
+_MULTI_TEAM_UNCONFIGURED_VARIABLE_WRITE_MSG = (
+    "Multi-team mode is not configured in the Airflow environment. To assign a team to a variable, multi-mode must be enabled."
+)
+_MULTI_TEAM_UNCONFIGURED_TASK_DELETE_MSG = (
+    "Multi-team mode is not configured in the Airflow environment but the task trying to delete the variable belongs to a team"
+)
+_SECRETS_BACKEND_RETRIEVE_FAILED_MSG = (
+    "Unable to retrieve variable from secrets backend (%s). "
+    "Checking subsequent secrets backend."
+)
+
 
 class Variable(Base, LoggingMixin):
     """A generic way to store and retrieve arbitrary content or settings as a simple key/value store."""
@@ -171,9 +185,7 @@ class Variable(Base, LoggingMixin):
             return var_val
 
         if team_name and not conf.getboolean("core", "multi_team"):
-            raise ValueError(
-                "Multi-team mode is not configured in the Airflow environment but the task trying to access the variable belongs to a team"
-            )
+            raise ValueError(_MULTI_TEAM_UNCONFIGURED_TASK_READ_MSG)
 
         var_val = Variable.get_variable_from_secrets(key=key, team_name=team_name)
         if var_val is None:
@@ -232,9 +244,7 @@ class Variable(Base, LoggingMixin):
             return
 
         if team_name and not conf.getboolean("core", "multi_team"):
-            raise ValueError(
-                "Multi-team mode is not configured in the Airflow environment. To assign a team to a variable, multi-mode must be enabled."
-            )
+            raise ValueError(_MULTI_TEAM_UNCONFIGURED_VARIABLE_WRITE_MSG)
 
         # check if the secret exists in the custom secrets' backend.
         from airflow.sdk import SecretCache
@@ -363,9 +373,7 @@ class Variable(Base, LoggingMixin):
             return
 
         if team_name and not conf.getboolean("core", "multi_team"):
-            raise ValueError(
-                "Multi-team mode is not configured in the Airflow environment. To assign a team to a variable, multi-mode must be enabled."
-            )
+            raise ValueError(_MULTI_TEAM_UNCONFIGURED_VARIABLE_WRITE_MSG)
 
         Variable.check_for_write_conflict(key=key)
 
@@ -426,9 +434,7 @@ class Variable(Base, LoggingMixin):
             return 1
 
         if team_name and not conf.getboolean("core", "multi_team"):
-            raise ValueError(
-                "Multi-team mode is not configured in the Airflow environment but the task trying to delete the variable belongs to a team"
-            )
+            raise ValueError(_MULTI_TEAM_UNCONFIGURED_TASK_DELETE_MSG)
 
         from airflow.sdk import SecretCache
 
@@ -483,8 +489,7 @@ class Variable(Base, LoggingMixin):
                         return
                 except Exception:
                     log.exception(
-                        "Unable to retrieve variable from secrets backend (%s). "
-                        "Checking subsequent secrets backend.",
+                        _SECRETS_BACKEND_RETRIEVE_FAILED_MSG,
                         type(secrets_backend).__name__,
                     )
             return None
@@ -516,8 +521,7 @@ class Variable(Base, LoggingMixin):
                     break
             except Exception:
                 log.exception(
-                    "Unable to retrieve variable from secrets backend (%s). "
-                    "Checking subsequent secrets backend.",
+                    _SECRETS_BACKEND_RETRIEVE_FAILED_MSG,
                     type(secrets_backend).__name__,
                 )
 
