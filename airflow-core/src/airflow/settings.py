@@ -189,8 +189,22 @@ def replace_showwarning(replacement):
     return original
 
 
-original_show_warning = replace_showwarning(custom_show_warning)
-atexit.register(partial(replace_showwarning, original_show_warning))
+_warnings_configuration_done = False
+
+
+def configure_warnings() -> None:
+    """
+    Install rich-based warning display and register cleanup on process exit.
+
+    Called from :func:`initialize` so that ``import airflow.settings`` does not
+    mutate global warning handlers as an import side effect.
+    """
+    global _warnings_configuration_done
+    if _warnings_configuration_done:
+        return
+    original_show_warning = replace_showwarning(custom_show_warning)
+    atexit.register(partial(replace_showwarning, original_show_warning))
+    _warnings_configuration_done = True
 
 
 def task_policy(task):
@@ -714,6 +728,7 @@ def import_local_settings():
 
 def initialize():
     """Initialize Airflow with all the settings from this file."""
+    configure_warnings()
     configure_vars()
     prepare_syspath_for_config_and_plugins()
     policy_mgr = get_policy_plugin_manager()
