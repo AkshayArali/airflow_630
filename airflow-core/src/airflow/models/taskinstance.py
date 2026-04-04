@@ -168,19 +168,19 @@ def _stop_remaining_tasks(*, task_instance: TaskInstance, task_teardown_map=None
             teardown = task_teardown_map[ti.task_id]
         else:
             teardown = task_instance.task.dag.task_dict[ti.task_id].is_teardown
-        if not teardown:
-            if ti.state == TaskInstanceState.RUNNING:
-                log.info("Forcing task %s to fail due to dag's `fail_fast` setting", ti.task_id)
-                msg = "Forcing task to fail due to dag's `fail_fast` setting."
-                session.add(Log(event="fail task", extra=msg, task_instance=ti.key))
-                ti.error(session)
-            else:
-                log.info("Setting task %s to SKIPPED due to dag's `fail_fast` setting.", ti.task_id)
-                msg = "Skipping task due to dag's `fail_fast` setting."
-                session.add(Log(event="skip task", extra=msg, task_instance=ti.key))
-                ti.set_state(state=TaskInstanceState.SKIPPED, session=session)
-        else:
+        if teardown:
             log.info("Not skipping teardown task '%s'", ti.task_id)
+            continue
+        if ti.state == TaskInstanceState.RUNNING:
+            log.info("Forcing task %s to fail due to dag's `fail_fast` setting", ti.task_id)
+            msg = "Forcing task to fail due to dag's `fail_fast` setting."
+            session.add(Log(event="fail task", extra=msg, task_instance=ti.key))
+            ti.error(session)
+        else:
+            log.info("Setting task %s to SKIPPED due to dag's `fail_fast` setting.", ti.task_id)
+            msg = "Skipping task due to dag's `fail_fast` setting."
+            session.add(Log(event="skip task", extra=msg, task_instance=ti.key))
+            ti.set_state(state=TaskInstanceState.SKIPPED, session=session)
 
 
 def _recalculate_dagrun_queued_at_deadlines(
@@ -340,7 +340,7 @@ def clear_task_instances(
                     log.warning("No serialized dag found for dag '%s'", dr.dag_id)
                 if dr_dag and not dr_dag.disable_bundle_versioning and run_on_latest_version:
                     bundle_version = dr.dag_model.bundle_version
-                    if bundle_version is not None and run_on_latest_version:
+                    if bundle_version is not None:
                         dr.bundle_version = bundle_version
                 if dag_run_state == DagRunState.QUEUED:
                     dr.last_scheduling_decision = None
