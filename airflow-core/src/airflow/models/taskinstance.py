@@ -24,6 +24,7 @@ import logging
 import math
 from collections import defaultdict
 from collections.abc import Collection, Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
@@ -99,6 +100,30 @@ from airflow.utils.sqlalchemy import ExecutorConfigType, ExtendedJSON, UtcDateTi
 from airflow.utils.state import DagRunState, State, TaskInstanceState
 
 TR = TaskReschedule
+
+
+@dataclass(frozen=True, slots=True)
+class TaskExecutionDependencyOptions:
+    """Dependency-check flags for :meth:`TaskInstance._check_and_change_state_before_execution`."""
+
+    verbose: bool = True
+    ignore_all_deps: bool = False
+    ignore_depends_on_past: bool = False
+    wait_for_past_depends_before_skipping: bool = False
+    ignore_task_deps: bool = False
+    ignore_ti_state: bool = False
+    mark_success: bool = False
+    test_mode: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class TaskExecutionWorkerContext:
+    """Worker identity and executor fields for pre-execution state transition."""
+
+    hostname: str = ""
+    pool: str | None = None
+    external_executor_id: str | None = None
+
 
 log = logging.getLogger(__name__)
 
@@ -1093,17 +1118,9 @@ class TaskInstance(Base, LoggingMixin):
     def _check_and_change_state_before_execution(
         cls,
         task_instance: TaskInstance,
-        verbose: bool = True,
-        ignore_all_deps: bool = False,
-        ignore_depends_on_past: bool = False,
-        wait_for_past_depends_before_skipping: bool = False,
-        ignore_task_deps: bool = False,
-        ignore_ti_state: bool = False,
-        mark_success: bool = False,
-        test_mode: bool = False,
-        hostname: str = "",
-        pool: str | None = None,
-        external_executor_id: str | None = None,
+        *,
+        dep_options: TaskExecutionDependencyOptions,
+        worker_context: TaskExecutionWorkerContext,
         session: Session = NEW_SESSION,
     ) -> bool:
         """
@@ -1112,17 +1129,8 @@ class TaskInstance(Base, LoggingMixin):
         Returns True if and only if state is set to RUNNING, which implies that task should be
         executed, in preparation for _run_raw_task.
 
-        :param verbose: whether to turn on more verbose logging
-        :param ignore_all_deps: Ignore all of the non-critical dependencies, just runs
-        :param ignore_depends_on_past: Ignore depends_on_past DAG attribute
-        :param wait_for_past_depends_before_skipping: Wait for past depends before mark the ti as skipped
-        :param ignore_task_deps: Don't check the dependencies of this TaskInstance's task
-        :param ignore_ti_state: Disregards previous task instance state
-        :param mark_success: Don't run the task, mark its state as success
-        :param test_mode: Doesn't record success or failure in the DB
-        :param hostname: The hostname of the worker running the task instance.
-        :param pool: specifies the pool to use to run the task instance
-        :param external_executor_id: The identifier of the celery executor
+        :param dep_options: Flags controlling dependency checks, logging, and test mode
+        :param worker_context: Hostname, pool, and external executor id for this run attempt
         :param session: SQLAlchemy ORM Session
         :return: whether the state was changed to running or not
         """
@@ -1131,25 +1139,29 @@ class TaskInstance(Base, LoggingMixin):
 
         ti: TaskInstance = task_instance
         task = task_instance.task
-        ti.refresh_from_task(task, pool_override=pool)
-        ti.test_mode = test_mode
+        ti.refresh_from_task(task, pool_override=worker_context.pool)
+        ti.test_mode = dep_options.test_mode
         ti.refresh_from_db(session=session, lock_for_update=True)
-        ti.hostname = hostname
+        ti.hostname = worker_context.hostname
         ti.pid = None
 
-        if not ignore_all_deps and not ignore_ti_state and ti.state == TaskInstanceState.SUCCESS:
+        if (
+            not dep_options.ignore_all_deps
+            and not dep_options.ignore_ti_state
+            and ti.state == TaskInstanceState.SUCCESS
+        ):
             Stats.incr("previously_succeeded", tags=ti.stats_tags)
 
-        if not mark_success:
+        if not dep_options.mark_success:
             # Firstly find non-runnable and non-requeueable tis.
             # Since mark_success is not set, we do nothing.
             non_requeueable_dep_context = DepContext(
                 deps=RUNNING_DEPS - REQUEUEABLE_DEPS,
-                ignore_all_deps=ignore_all_deps,
-                ignore_ti_state=ignore_ti_state,
-                ignore_depends_on_past=ignore_depends_on_past,
-                wait_for_past_depends_before_skipping=wait_for_past_depends_before_skipping,
-                ignore_task_deps=ignore_task_deps,
+                ignore_all_deps=dep_options.ignore_all_deps,
+                ignore_ti_state=dep_options.ignore_ti_state,
+                ignore_depends_on_past=dep_options.ignore_depends_on_past,
+                wait_for_past_depends_before_skipping=dep_options.wait_for_past_depends_before_skipping,
+                ignore_task_deps=dep_options.ignore_task_deps,
                 description="non-requeueable deps",
             )
             if not ti.are_dependencies_met(
@@ -1177,11 +1189,11 @@ class TaskInstance(Base, LoggingMixin):
             # e.g. because of backfilling.
             dep_context = DepContext(
                 deps=REQUEUEABLE_DEPS,
-                ignore_all_deps=ignore_all_deps,
-                ignore_depends_on_past=ignore_depends_on_past,
-                wait_for_past_depends_before_skipping=wait_for_past_depends_before_skipping,
-                ignore_task_deps=ignore_task_deps,
-                ignore_ti_state=ignore_ti_state,
+                ignore_all_deps=dep_options.ignore_all_deps,
+                ignore_depends_on_past=dep_options.ignore_depends_on_past,
+                wait_for_past_depends_before_skipping=dep_options.wait_for_past_depends_before_skipping,
+                ignore_task_deps=dep_options.ignore_task_deps,
+                ignore_ti_state=dep_options.ignore_ti_state,
                 description="requeueable deps",
             )
             if not ti.are_dependencies_met(dep_context=dep_context, session=session, verbose=True):
@@ -1203,17 +1215,17 @@ class TaskInstance(Base, LoggingMixin):
         else:
             cls.logger().info("Starting attempt %s of %s", ti.try_number, ti.max_tries + 1)
 
-        if not test_mode:
+        if not dep_options.test_mode:
             session.add(Log(TaskInstanceState.RUNNING.value, ti))
 
         ti.state = TaskInstanceState.RUNNING
         ti.emit_state_change_metric(TaskInstanceState.RUNNING)
 
-        if external_executor_id:
-            ti.external_executor_id = external_executor_id
+        if worker_context.external_executor_id:
+            ti.external_executor_id = worker_context.external_executor_id
 
         ti.end_date = None
-        if not test_mode:
+        if not dep_options.test_mode:
             session.merge(ti).task = task
         session.commit()
 
@@ -1221,8 +1233,8 @@ class TaskInstance(Base, LoggingMixin):
         # "max number of connections reached"
         if settings.engine is not None:
             settings.engine.dispose()
-        if verbose:
-            if mark_success:
+        if dep_options.verbose:
+            if dep_options.mark_success:
                 cls.logger().info("Marking success for %s on %s", ti.task, ti.logical_date)
             else:
                 cls.logger().info("Executing %s on %s", ti.task, ti.logical_date)
@@ -1245,17 +1257,21 @@ class TaskInstance(Base, LoggingMixin):
     ) -> bool:
         return TaskInstance._check_and_change_state_before_execution(
             task_instance=self,
-            verbose=verbose,
-            ignore_all_deps=ignore_all_deps,
-            ignore_depends_on_past=ignore_depends_on_past,
-            wait_for_past_depends_before_skipping=wait_for_past_depends_before_skipping,
-            ignore_task_deps=ignore_task_deps,
-            ignore_ti_state=ignore_ti_state,
-            mark_success=mark_success,
-            test_mode=test_mode,
-            hostname=get_hostname(),
-            pool=pool,
-            external_executor_id=external_executor_id,
+            dep_options=TaskExecutionDependencyOptions(
+                verbose=verbose,
+                ignore_all_deps=ignore_all_deps,
+                ignore_depends_on_past=ignore_depends_on_past,
+                wait_for_past_depends_before_skipping=wait_for_past_depends_before_skipping,
+                ignore_task_deps=ignore_task_deps,
+                ignore_ti_state=ignore_ti_state,
+                mark_success=mark_success,
+                test_mode=test_mode,
+            ),
+            worker_context=TaskExecutionWorkerContext(
+                hostname=get_hostname(),
+                pool=pool,
+                external_executor_id=external_executor_id,
+            ),
             session=session,
         )
 
