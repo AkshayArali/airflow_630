@@ -59,6 +59,14 @@ airflow_commands = core_commands.copy()  # make a copy to prevent bad interactio
 
 log = logging.getLogger(__name__)
 
+# Expected failures while optionally loading provider/executor/auth CLI extensions.
+_CLI_COMMAND_LOAD_ERRORS: tuple[type[BaseException], ...] = (
+    ImportError,
+    ModuleNotFoundError,
+    AirflowException,
+    RuntimeError,
+)
+
 # AIRFLOW_PACKAGE_NAME is set when generating docs and we don't want to load provider commands when generating airflow-core CLI docs
 if not os.environ.get("AIRFLOW_PACKAGE_NAME", None):
     providers_manager = ProvidersManager()
@@ -67,13 +75,21 @@ if not os.environ.get("AIRFLOW_PACKAGE_NAME", None):
         for cli_function in providers_manager.cli_command_functions:
             try:
                 airflow_commands.extend(cli_function())
-            except Exception:
-                log.exception("Failed to load CLI commands from provider function: %s", cli_function.__name__)
+            except _CLI_COMMAND_LOAD_ERRORS as exc:
+                log.exception(
+                    "Failed to load CLI commands from provider function: %s (%s)",
+                    cli_function.__name__,
+                    type(exc).__name__,
+                )
                 log.error("Ensure all dependencies are met and try again.")
                 # Do not re-raise the exception since we want the CLI to still function for
                 # other commands.
-    except Exception as e:
-        log.warning("Failed to load CLI commands from providers: %s", e)
+    except _CLI_COMMAND_LOAD_ERRORS as e:
+        log.warning(
+            "Failed to load CLI commands from providers (%s): %s",
+            type(e).__name__,
+            e,
+        )
         # do not re-raise for the same reason as above
 
     WARNING_TEMPLATE = """
@@ -113,8 +129,12 @@ Providers with {component} missing 'cli' section in 'get_provider_info': {not_de
                 try:
                     executor, _ = ExecutorLoader.import_executor_cls(executor_name)
                     airflow_commands.extend(executor.get_cli_commands())
-                except Exception:
-                    log.exception("Failed to load CLI commands from executor: %s", executor_name)
+                except _CLI_COMMAND_LOAD_ERRORS as exc:
+                    log.exception(
+                        "Failed to load CLI commands from executor: %s (%s)",
+                        executor_name,
+                        type(exc).__name__,
+                    )
                     log.error(
                         "Ensure all dependencies are met and try again. If using a Celery based executor install "
                         "a 3.3.0+ version of the Celery provider. If using a Kubernetes executor, install a "
@@ -123,9 +143,10 @@ Providers with {component} missing 'cli' section in 'get_provider_info': {not_de
                     # Do not re-raise the exception since we want the CLI to still function for
                     # other commands.
 
-    except Exception as e:
+    except _CLI_COMMAND_LOAD_ERRORS as e:
         log.warning(
-            "Failed to load CLI commands from executors that didn't define `get_cli_commands` in `.cli.definition`: %s",
+            "Failed to load CLI commands from executors that didn't define `get_cli_commands` in `.cli.definition` (%s): %s",
+            type(e).__name__,
             e,
         )
 
@@ -160,14 +181,19 @@ Providers with {component} missing 'cli' section in 'get_provider_info': {not_de
                     auth_manager_cls = import_string(auth_manager_cls_path)
                     auth_manager = auth_manager_cls()
                     airflow_commands.extend(auth_manager.get_cli_commands())
-                except Exception:
-                    log.exception("Failed to load CLI commands from auth manager: %s", auth_manager_cls)
+                except _CLI_COMMAND_LOAD_ERRORS as exc:
+                    log.exception(
+                        "Failed to load CLI commands from auth manager: %s (%s)",
+                        auth_manager_cls_path,
+                        type(exc).__name__,
+                    )
                     log.error("Ensure all dependencies are met and try again.")
                     # Do not re-raise the exception since we want the CLI to still function for
                     # other commands.
-    except Exception as e:
+    except _CLI_COMMAND_LOAD_ERRORS as e:
         log.warning(
-            "Failed to load CLI commands from auth managers that didn't define `get_cli_commands` in `.cli.definition`: %s",
+            "Failed to load CLI commands from auth managers that didn't define `get_cli_commands` in `.cli.definition` (%s): %s",
+            type(e).__name__,
             e,
         )
 
