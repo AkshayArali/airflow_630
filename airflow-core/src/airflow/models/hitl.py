@@ -43,7 +43,8 @@ class JSONExtract(FunctionElement):
     :meta: private
     """
 
-    type = String()
+    # SQLAlchemy FunctionElement requires this attribute name for the SQL return type.
+    type = String()  # noqa: A001  # NOSONAR S5806 — SQLAlchemy requires the name ``type``
     inherit_cache = True
 
     def __init__(self, column: ColumnElement[Any], key: str, **kwargs: dict[str, Any]) -> None:
