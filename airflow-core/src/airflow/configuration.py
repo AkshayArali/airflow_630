@@ -124,6 +124,11 @@ def expand_env_var(env_var: None) -> None: ...
 def expand_env_var(env_var: str) -> str: ...
 
 
+# Legitimate nested expansion (e.g. A references B references a literal) is shallow; a
+# high iteration count almost always indicates a cyclic $VAR reference chain.
+_MAX_ENV_EXPANSION_ITERATIONS = 10
+
+
 def expand_env_var(env_var: str | None) -> str | None:
     """
     Expand (potentially nested) env vars.
@@ -133,7 +138,16 @@ def expand_env_var(env_var: str | None) -> str | None:
     """
     if not env_var or not isinstance(env_var, str):
         return env_var
+    original = env_var
+    iterations = 0
     while True:
+        iterations += 1
+        if iterations > _MAX_ENV_EXPANSION_ITERATIONS:
+            raise AirflowConfigException(
+                "Environment variable expansion did not stabilize after "
+                f"{_MAX_ENV_EXPANSION_ITERATIONS} iterations; "
+                f"possible circular reference (starting from {original!r})."
+            )
         interpolated = os.path.expanduser(os.path.expandvars(str(env_var)))
         if interpolated == env_var:
             return interpolated
