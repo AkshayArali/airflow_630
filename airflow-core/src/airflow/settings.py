@@ -53,7 +53,7 @@ from airflow._shared.timezones.timezone import (
     utc,
 )
 from airflow.configuration import AIRFLOW_HOME, conf
-from airflow.exceptions import AirflowInternalRuntimeError
+from airflow.exceptions import AirflowConfigException, AirflowInternalRuntimeError
 from airflow.logging_config import configure_logging
 from airflow.utils.orm_event_handlers import setup_event_handlers
 
@@ -247,16 +247,39 @@ def load_policy_plugins(pm: pluggy.PluginManager):
     pm.load_setuptools_entrypoints("airflow.policy")
 
 
-def _get_async_conn_uri_from_sync(sync_uri):
-    AIO_LIBS_MAPPING = {"sqlite": "aiosqlite", "postgresql": "asyncpg", "mysql": "aiomysql"}
-    """Mapping of sync scheme to async scheme."""
+# Primary SQL dialect (before any sync driver suffix, e.g. ``postgresql`` from
+# ``postgresql+psycopg2``) to the async driver Airflow uses when
+# ``sql_alchemy_conn_async`` is not set.
+_SYNC_SCHEME_TO_ASYNC_LIB: dict[str, str] = {
+    "sqlite": "aiosqlite",
+    "postgresql": "asyncpg",
+    "mysql": "aiomysql",
+}
 
-    scheme, rest = sync_uri.split(":", maxsplit=1)
-    scheme = scheme.split("+", maxsplit=1)[0]
-    aiolib = AIO_LIBS_MAPPING.get(scheme)
-    if aiolib:
-        return f"{scheme}+{aiolib}:{rest}"
-    return sync_uri
+
+def _get_async_conn_uri_from_sync(sync_uri: str) -> str:
+    """
+    Derive a default async SQLAlchemy URL from a synchronous connection URL.
+
+    Supported dialects are listed in ``_SYNC_SCHEME_TO_ASYNC_LIB``. Other URLs
+    are returned unchanged. Malformed URLs raise :class:`AirflowConfigException`.
+    """
+    from sqlalchemy.engine.url import make_url
+    from sqlalchemy.exc import ArgumentError
+
+    try:
+        parsed = make_url(sync_uri)
+    except ArgumentError as e:
+        raise AirflowConfigException(
+            f"Invalid database URL for async SQLAlchemy conversion: {sync_uri!r}"
+        ) from e
+
+    dialect = parsed.drivername.split("+", maxsplit=1)[0]
+    async_lib = _SYNC_SCHEME_TO_ASYNC_LIB.get(dialect)
+    if async_lib is None:
+        return sync_uri
+    new_drivername = f"{dialect}+{async_lib}"
+    return parsed.set(drivername=new_drivername).render_as_string(hide_password=False)
 
 
 def configure_vars():

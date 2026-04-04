@@ -228,3 +228,32 @@ def test_sqlite_relative_path(value, expectation):
     ):
         with expectation:
             settings.configure_orm()
+
+
+class TestAsyncConnUriFromSync:
+    def test_postgresql_preserves_query_and_encoded_password(self):
+        from airflow.settings import _get_async_conn_uri_from_sync
+
+        sync_uri = "postgresql://user:p%40ss@host/dbname?sslmode=require"
+        async_uri = _get_async_conn_uri_from_sync(sync_uri)
+        assert "asyncpg" in async_uri
+        assert "sslmode=require" in async_uri
+        assert "p%40ss" in async_uri
+
+    def test_mysql_and_sqlite(self):
+        from airflow.settings import _get_async_conn_uri_from_sync
+
+        assert "+aiomysql" in _get_async_conn_uri_from_sync("mysql://user:pw@localhost/mydb")
+        assert "+aiosqlite" in _get_async_conn_uri_from_sync("sqlite:///tmp/airflow.db")
+
+    def test_unknown_dialect_unchanged(self):
+        from airflow.settings import _get_async_conn_uri_from_sync
+
+        uri = "oracle+cx_oracle://user:pass@host/sid"
+        assert _get_async_conn_uri_from_sync(uri) == uri
+
+    def test_invalid_uri_raises(self):
+        from airflow.settings import _get_async_conn_uri_from_sync
+
+        with pytest.raises(AirflowConfigException):
+            _get_async_conn_uri_from_sync("not a valid sqlalchemy url%%%")
