@@ -607,6 +607,16 @@ class TestCli:
                 action_cmd.name, help=action_cmd.help, description=action_cmd.help, epilog=action_cmd.epilog
             )
 
+    @pytest.mark.non_db_test_override
+    def test_configure_command_invalid_type_raises(self):
+        """_configure_command base dispatch must raise AirflowException for unknown types."""
+        from airflow.exceptions import AirflowException
+
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers()
+        with pytest.raises(AirflowException, match="Invalid command definition"):
+            cli_parser._configure_command(object(), subparsers)
+
 
 # We need to run it from sources with PYTHONPATH, not command line tool,
 # because we need to make sure that we have providers configured from source provider.yaml files
