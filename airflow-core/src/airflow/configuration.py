@@ -28,10 +28,9 @@ from base64 import b64encode
 from collections.abc import Callable
 from configparser import ConfigParser
 from copy import deepcopy
-from inspect import ismodule
 from io import StringIO
 from re import Pattern
-from typing import IO, TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlsplit
 
 from typing_extensions import overload
@@ -164,6 +163,37 @@ def _default_config_file_path(file_name: str) -> str:
     return os.path.join(templates_dir, file_name)
 
 
+class ConfigDescriptionSource(Protocol):
+    """Adapter target: a source of configuration schema/description data."""
+
+    def fetch(self) -> dict[str, dict[str, Any]]:
+        """Return option metadata as nested section dicts."""
+
+
+class FileConfigDescriptionAdapter:
+    """Adapts disk-backed core `config.yml` to the common description shape."""
+
+    def fetch(self) -> dict[str, dict[str, Any]]:
+        with open(_default_config_file_path("config.yml")) as config_file:
+            return yaml.safe_load(config_file)
+
+
+class ProvidersConfigDescriptionAdapter:
+    """Adapts provider manager metadata to the same description shape."""
+
+    def __init__(self, selected_provider: str | None) -> None:
+        self._selected_provider = selected_provider
+
+    def fetch(self) -> dict[str, dict[str, Any]]:
+        from airflow.providers_manager import ProvidersManager
+
+        merged: dict[str, dict[str, Any]] = {}
+        for provider, config in ProvidersManager().provider_configs:
+            if not self._selected_provider or provider == self._selected_provider:
+                merged.update(config)
+        return merged
+
+
 def retrieve_configuration_description(
     include_airflow: bool = True,
     include_providers: bool = True,
@@ -177,17 +207,116 @@ def retrieve_configuration_description(
     :param selected_provider: If specified, include selected provider only
     :return: Python dictionary containing configs & their info
     """
-    base_configuration_description: dict[str, dict[str, Any]] = {}
+    sources: list[ConfigDescriptionSource] = []
     if include_airflow:
-        with open(_default_config_file_path("config.yml")) as config_file:
-            base_configuration_description.update(yaml.safe_load(config_file))
+        sources.append(FileConfigDescriptionAdapter())
     if include_providers:
-        from airflow.providers_manager import ProvidersManager
-
-        for provider, config in ProvidersManager().provider_configs:
-            if not selected_provider or provider == selected_provider:
-                base_configuration_description.update(config)
+        sources.append(ProvidersConfigDescriptionAdapter(selected_provider))
+    base_configuration_description: dict[str, dict[str, Any]] = {}
+    for source in sources:
+        base_configuration_description.update(source.fetch())
     return base_configuration_description
+
+
+class _CustomConfigFileWriter:
+    """
+    Template Method for custom config file output: collection, optional transforms, render, write.
+
+    Keeps ``AirflowConfigParser.write_custom_config`` as thin orchestration.
+    """
+
+    def __init__(self, parser: AirflowConfigParser, modifications: ConfigModifications) -> None:
+        self._parser = parser
+        self._modifications = modifications
+
+    def write(
+        self,
+        file: IO[str],
+        comment_out_defaults: bool,
+        include_descriptions: bool,
+        extra_spacing: bool,
+    ) -> None:
+        output = self.collect_effective_options()
+        self.render_sections_to_file(
+            file,
+            output,
+            comment_out_defaults=comment_out_defaults,
+            include_descriptions=include_descriptions,
+            extra_spacing=extra_spacing,
+        )
+
+    def collect_effective_options(self) -> dict[str, list[tuple[str, str, bool, str]]]:
+        modifications = self._modifications
+        output: dict[str, list[tuple[str, str, bool, str]]] = {}
+        parser = self._parser
+
+        for section in parser._sections:  # type: ignore[attr-defined]
+            for option, orig_value in parser._sections[section].items():  # type: ignore[attr-defined]
+                key = (section.lower(), option.lower())
+                if key in modifications.remove:
+                    continue
+
+                mod_comment = ""
+                if key in modifications.rename:
+                    new_sec, new_opt = modifications.rename[key]
+                    effective_section = new_sec
+                    effective_option = new_opt
+                    mod_comment += f"# Renamed from {section}.{option}\n"
+                else:
+                    effective_section = section
+                    effective_option = option
+
+                value = orig_value
+                if key in modifications.default_updates:
+                    mod_comment += (
+                        f"# Default updated from {orig_value} to {modifications.default_updates[key]}\n"
+                    )
+                    value = modifications.default_updates[key]
+
+                default_value = parser.get_default_value(effective_section, effective_option, fallback="")
+                is_default = str(value) == str(default_value)
+                output.setdefault(effective_section.lower(), []).append(
+                    (effective_option, str(value), is_default, mod_comment)
+                )
+        return output
+
+    def render_sections_to_file(
+        self,
+        file: IO[str],
+        output: dict[str, list[tuple[str, str, bool, str]]],
+        *,
+        comment_out_defaults: bool,
+        include_descriptions: bool,
+        extra_spacing: bool,
+    ) -> None:
+        modifications = self._modifications
+        parser = self._parser
+
+        for section, options in output.items():
+            section_buffer = StringIO()
+            section_buffer.write(f"[{section}]\n")
+            if include_descriptions:
+                description = parser.configuration_description.get(section, {}).get("description", "")
+                if description:
+                    for line in description.splitlines():
+                        section_buffer.write(f"# {line}\n")
+                    section_buffer.write("\n")
+            for option, value_str, is_default, mod_comment in options:
+                key = (section.lower(), option.lower())
+                if key in modifications.default_updates and comment_out_defaults:
+                    section_buffer.write(f"# {option} = {value_str}\n")
+                else:
+                    if mod_comment:
+                        section_buffer.write(mod_comment)
+                    if is_default and comment_out_defaults:
+                        section_buffer.write(f"# {option} = {value_str}\n")
+                    else:
+                        section_buffer.write(f"{option} = {value_str}\n")
+                if extra_spacing:
+                    section_buffer.write("\n")
+            content = section_buffer.getvalue().strip()
+            if content:
+                file.write(f"{content}\n\n")
 
 
 class AirflowConfigParser(_SharedAirflowConfigParser):
@@ -347,62 +476,12 @@ class AirflowConfigParser(_SharedAirflowConfigParser):
         :param modifications: ConfigModifications instance with rename, remove, and default updates.
         """
         modifications = modifications or ConfigModifications()
-        output: dict[str, list[tuple[str, str, bool, str]]] = {}
-
-        for section in self._sections:  # type: ignore[attr-defined]  # accessing _sections from ConfigParser
-            for option, orig_value in self._sections[section].items():  # type: ignore[attr-defined]
-                key = (section.lower(), option.lower())
-                if key in modifications.remove:
-                    continue
-
-                mod_comment = ""
-                if key in modifications.rename:
-                    new_sec, new_opt = modifications.rename[key]
-                    effective_section = new_sec
-                    effective_option = new_opt
-                    mod_comment += f"# Renamed from {section}.{option}\n"
-                else:
-                    effective_section = section
-                    effective_option = option
-
-                value = orig_value
-                if key in modifications.default_updates:
-                    mod_comment += (
-                        f"# Default updated from {orig_value} to {modifications.default_updates[key]}\n"
-                    )
-                    value = modifications.default_updates[key]
-
-                default_value = self.get_default_value(effective_section, effective_option, fallback="")
-                is_default = str(value) == str(default_value)
-                output.setdefault(effective_section.lower(), []).append(
-                    (effective_option, str(value), is_default, mod_comment)
-                )
-
-        for section, options in output.items():
-            section_buffer = StringIO()
-            section_buffer.write(f"[{section}]\n")
-            if include_descriptions:
-                description = self.configuration_description.get(section, {}).get("description", "")
-                if description:
-                    for line in description.splitlines():
-                        section_buffer.write(f"# {line}\n")
-                    section_buffer.write("\n")
-            for option, value_str, is_default, mod_comment in options:
-                key = (section.lower(), option.lower())
-                if key in modifications.default_updates and comment_out_defaults:
-                    section_buffer.write(f"# {option} = {value_str}\n")
-                else:
-                    if mod_comment:
-                        section_buffer.write(mod_comment)
-                    if is_default and comment_out_defaults:
-                        section_buffer.write(f"# {option} = {value_str}\n")
-                    else:
-                        section_buffer.write(f"{option} = {value_str}\n")
-                if extra_spacing:
-                    section_buffer.write("\n")
-            content = section_buffer.getvalue().strip()
-            if content:
-                file.write(f"{content}\n\n")
+        _CustomConfigFileWriter(self, modifications).write(
+            file,
+            comment_out_defaults=comment_out_defaults,
+            include_descriptions=include_descriptions,
+            extra_spacing=extra_spacing,
+        )
 
     def _ensure_providers_config_loaded(self) -> None:
         """Ensure providers configurations are loaded."""
@@ -640,11 +719,9 @@ class AirflowConfigParser(_SharedAirflowConfigParser):
             ]
         }
 
-    def __setstate__(self, state) -> None:
-        """Restore the state of the object from a dictionary representation."""
-        self.__init__()  # type: ignore[misc]
-        config = state.pop("_sections")
-        self.read_dict(config)
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore pickled state (Memento) without re-running ``__init__`` / redundant config setup."""
+        self.__dict__.clear()
         self.__dict__.update(state)
 
 
@@ -661,16 +738,53 @@ def get_airflow_config(airflow_home: str) -> str:
     return expand_env_var(airflow_config_var)
 
 
+class ExpansionVariablesRegistry:
+    """
+    Registry/Builder for config template expansion variables.
+
+    Uses an explicit symbol list instead of scanning ``globals()``, so the interpolation contract is
+    reviewable and new module-level names do not accidentally alter expansion.
+    """
+
+    __slots__ = ("_symbol_names",)
+
+    def __init__(self, symbol_names: tuple[str, ...]) -> None:
+        self._symbol_names = symbol_names
+
+    def build(self) -> dict[str, Any]:
+        module = sys.modules[__name__]
+        result: dict[str, Any] = {
+            "FERNET_KEY": _SecretKeys.fernet_key,
+            "JWT_SECRET_KEY": _SecretKeys.jwt_secret_key,
+        }
+        for name in self._symbol_names:
+            if hasattr(module, name):
+                result[name] = getattr(module, name)
+        return result
+
+
+# Symbols considered for interpolation (non-callable module exports), resolved only if defined.
+_REGISTERED_EXPANSION_SYMBOLS: tuple[str, ...] = (
+    "log",
+    "ConfigType",
+    "ConfigOptionsDictType",
+    "ConfigSectionSourcesType",
+    "ConfigSourcesType",
+    "ENV_VAR_PREFIX",
+    "VALUE_NOT_FOUND_SENTINEL",
+    "ValueNotFound",
+    "AIRFLOW_HOME",
+    "AIRFLOW_CONFIG",
+    "TEST_DAGS_FOLDER",
+    "TEST_PLUGINS_FOLDER",
+    "SECRET_KEY",
+    "conf",
+    "secrets_backend_list",
+)
+
+
 def get_all_expansion_variables() -> dict[str, Any]:
-    return {
-        "FERNET_KEY": _SecretKeys.fernet_key,
-        "JWT_SECRET_KEY": _SecretKeys.jwt_secret_key,
-        **{
-            k: v
-            for k, v in globals().items()
-            if not k.startswith("_") and not callable(v) and not ismodule(v)
-        },
-    }
+    return ExpansionVariablesRegistry(_REGISTERED_EXPANSION_SYMBOLS).build()
 
 
 def _generate_fernet_key() -> str:

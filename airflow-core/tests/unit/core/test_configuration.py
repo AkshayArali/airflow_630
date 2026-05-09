@@ -2047,3 +2047,38 @@ def test_ensure_fernet_is_generated(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
     assert airflow.configuration._SecretKeys.fernet_key
     assert airflow.configuration._SecretKeys.fernet_key != "None"
+
+
+def test_get_all_expansion_variables_ignores_unregistered_module_attributes():
+    """Regression: expansion keys are explicit; random new module attrs must not alter interpolation dict."""
+    import airflow.configuration as c
+
+    keys_before = set(c.get_all_expansion_variables().keys())
+    setattr(c, "DUMMY_P3_EXPANSION_ATTR", "should_not_appear_in_expansion")
+    try:
+        keys_after = set(c.get_all_expansion_variables().keys())
+        assert "DUMMY_P3_EXPANSION_ATTR" not in keys_after
+        assert keys_before == keys_after
+    finally:
+        delattr(c, "DUMMY_P3_EXPANSION_ATTR")
+
+
+def test_airflow_config_parser_unpickle_avoids_rerunning_init(monkeypatch: pytest.MonkeyPatch):
+    import pickle
+
+    from airflow.configuration import AirflowConfigParser
+
+    init_count = 0
+    orig_init = AirflowConfigParser.__init__
+
+    def counting_init(self, *args, **kwargs):
+        nonlocal init_count
+        init_count += 1
+        return orig_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(AirflowConfigParser, "__init__", counting_init)
+    parser = AirflowConfigParser()
+    assert init_count == 1
+    roundtrip = pickle.loads(pickle.dumps(parser))
+    assert init_count == 1
+    assert isinstance(roundtrip, AirflowConfigParser)

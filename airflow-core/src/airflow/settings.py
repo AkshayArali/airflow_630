@@ -325,34 +325,37 @@ def run_providers_custom_runtime_checks():
     _run_openlineage_runtime_check()
 
 
-class SkipDBTestsSession:
+_DB_DISABLED_SESSION_MESSAGE = (
+    "Your test accessed the DB but `_AIRFLOW_SKIP_DB_TESTS` is set.\n"
+    "Either make sure your test does not use database or mark the test with `@pytest.mark.db_test`\n"
+    "See https://github.com/apache/airflow/blob/main/contributing-docs/testing/unit_tests.rst#"
+    "best-practices-for-db-tests on how "
+    "to deal with it and consult examples."
+)
+
+
+class _DBDisabledSessionMeta(type):
+    """Routes class-level access to a single failure (Null Object for skipped DB tests)."""
+
+    def __getattr__(cls, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        raise AirflowInternalRuntimeError(_DB_DISABLED_SESSION_MESSAGE)
+
+
+class DBDisabledSession(metaclass=_DBDisabledSessionMeta):
     """
-    This fake session is used to skip DB tests when `_AIRFLOW_SKIP_DB_TESTS` is set.
+    Stand-in ``Session`` when DB tests are skipped: every interaction raises the same clear error.
 
     :meta private:
     """
 
-    def __init__(self):
-        raise AirflowInternalRuntimeError(
-            "Your test accessed the DB but `_AIRFLOW_SKIP_DB_TESTS` is set.\n"
-            "Either make sure your test does not use database or mark the test with `@pytest.mark.db_test`\n"
-            "See https://github.com/apache/airflow/blob/main/contributing-docs/testing/unit_tests.rst#"
-            "best-practices-for-db-tests on how "
-            "to deal with it and consult examples."
-        )
+    def __init__(self, *args, **kwargs):
+        raise AirflowInternalRuntimeError(_DB_DISABLED_SESSION_MESSAGE)
 
-    def remove(*args, **kwargs):
-        pass
 
-    def get_bind(
-        self,
-        mapper=None,
-        clause=None,
-        bind=None,
-        _sa_skip_events=None,
-        _sa_skip_for_implicit_returning=False,
-    ):
-        pass
+# Backward-compatible alias
+SkipDBTestsSession = DBDisabledSession
 
 
 def _is_sqlite_db_path_relative(sqla_conn_str: str) -> bool:
@@ -430,7 +433,7 @@ def configure_orm(disable_connection_pool=False, pool_class=None):
 
     if os.environ.get("_AIRFLOW_SKIP_DB_TESTS") == "true":
         # Skip DB initialization in unit tests, if DB tests are skipped
-        Session = SkipDBTestsSession
+        Session = DBDisabledSession
         engine = None
         return
     log.debug("Setting up DB connection pool (PID %s)", os.getpid())
@@ -480,9 +483,10 @@ def configure_orm(disable_connection_pool=False, pool_class=None):
         register_at_fork(after_in_child=clean_in_fork)
 
 
-def prepare_engine_args(disable_connection_pool=False, pool_class=None):
-    """Prepare SQLAlchemy engine args."""
-    DEFAULT_ENGINE_ARGS: dict[str, dict[str, Any]] = {
+class EngineArgsBuilder:
+    """Builder for SQLAlchemy engine kwargs (incremental, dialect-specific steps)."""
+
+    _DEFAULT_ENGINE_ARGS: dict[str, dict[str, Any]] = {
         "postgresql": (
             {
                 "insertmanyvalues_page_size": 10000,
@@ -495,73 +499,88 @@ def prepare_engine_args(disable_connection_pool=False, pool_class=None):
         )
     }
 
-    default_args = {}
-    for dialect, default in DEFAULT_ENGINE_ARGS.items():
-        if SQL_ALCHEMY_CONN.startswith(dialect):
-            default_args = default.copy()
-            break
+    def __init__(self, disable_connection_pool: bool = False, pool_class: Any = None) -> None:
+        self._disable_connection_pool = disable_connection_pool
+        self._pool_class = pool_class
 
-    engine_args: dict = conf.getjson("database", "sql_alchemy_engine_args", fallback=default_args)
+    def _dialect_defaults(self) -> dict[str, Any]:
+        default_args: dict[str, Any] = {}
+        for dialect, default in self._DEFAULT_ENGINE_ARGS.items():
+            if SQL_ALCHEMY_CONN.startswith(dialect):
+                default_args = default.copy()
+                break
+        return conf.getjson("database", "sql_alchemy_engine_args", fallback=default_args)
 
-    if pool_class:
-        # Don't use separate settings for size etc, only those from sql_alchemy_engine_args
-        engine_args["poolclass"] = pool_class
-    elif disable_connection_pool or not conf.getboolean("database", "SQL_ALCHEMY_POOL_ENABLED"):
-        engine_args["poolclass"] = NullPool
-        log.debug("settings.prepare_engine_args(): Using NullPool")
-    elif not SQL_ALCHEMY_CONN.startswith("sqlite"):
-        # Pool size engine args not supported by sqlite.
-        # If no config value is defined for the pool size, select a reasonable value.
-        # 0 means no limit, which could lead to exceeding the Database connection limit.
-        pool_size = conf.getint("database", "SQL_ALCHEMY_POOL_SIZE", fallback=5)
+    def _apply_pool_policy(self, engine_args: dict[str, Any]) -> None:
+        if self._pool_class:
+            # Don't use separate settings for size etc, only those from sql_alchemy_engine_args
+            engine_args["poolclass"] = self._pool_class
+        elif self._disable_connection_pool or not conf.getboolean("database", "SQL_ALCHEMY_POOL_ENABLED"):
+            engine_args["poolclass"] = NullPool
+            log.debug("settings.prepare_engine_args(): Using NullPool")
+        elif not SQL_ALCHEMY_CONN.startswith("sqlite"):
+            # Pool size engine args not supported by sqlite.
+            # If no config value is defined for the pool size, select a reasonable value.
+            # 0 means no limit, which could lead to exceeding the Database connection limit.
+            pool_size = conf.getint("database", "SQL_ALCHEMY_POOL_SIZE", fallback=5)
 
-        # The maximum overflow size of the pool.
-        # When the number of checked-out connections reaches the size set in pool_size,
-        # additional connections will be returned up to this limit.
-        # When those additional connections are returned to the pool, they are disconnected and discarded.
-        # It follows then that the total number of simultaneous connections
-        # the pool will allow is pool_size + max_overflow,
-        # and the total number of "sleeping" connections the pool will allow is pool_size.
-        # max_overflow can be set to -1 to indicate no overflow limit;
-        # no limit will be placed on the total number
-        # of concurrent connections. Defaults to 10.
-        max_overflow = conf.getint("database", "SQL_ALCHEMY_MAX_OVERFLOW", fallback=10)
+            # The maximum overflow size of the pool.
+            # When the number of checked-out connections reaches the size set in pool_size,
+            # additional connections will be returned up to this limit.
+            # When those additional connections are returned to the pool, they are disconnected and discarded.
+            # It follows then that the total number of simultaneous connections
+            # the pool will allow is pool_size + max_overflow,
+            # and the total number of "sleeping" connections the pool will allow is pool_size.
+            # max_overflow can be set to -1 to indicate no overflow limit;
+            # no limit will be placed on the total number
+            # of concurrent connections. Defaults to 10.
+            max_overflow = conf.getint("database", "SQL_ALCHEMY_MAX_OVERFLOW", fallback=10)
 
-        # The DB server already has a value for wait_timeout (number of seconds after
-        # which an idle sleeping connection should be killed). Since other DBs may
-        # co-exist on the same server, SQLAlchemy should set its
-        # pool_recycle to an equal or smaller value.
-        pool_recycle = conf.getint("database", "SQL_ALCHEMY_POOL_RECYCLE", fallback=1800)
+            # The DB server already has a value for wait_timeout (number of seconds after
+            # which an idle sleeping connection should be killed). Since other DBs may
+            # co-exist on the same server, SQLAlchemy should set its
+            # pool_recycle to an equal or smaller value.
+            pool_recycle = conf.getint("database", "SQL_ALCHEMY_POOL_RECYCLE", fallback=1800)
 
-        # Check connection at the start of each connection pool checkout.
-        # Typically, this is a simple statement like "SELECT 1", but may also make use
-        # of some DBAPI-specific method to test the connection for liveness.
+            # Check connection at the start of each connection pool checkout.
+            # Typically, this is a simple statement like "SELECT 1", but may also make use
+            # of some DBAPI-specific method to test the connection for liveness.
+            # More information here:
+            # https://docs.sqlalchemy.org/en/14/core/pooling.html#disconnect-handling-pessimistic
+            pool_pre_ping = conf.getboolean("database", "SQL_ALCHEMY_POOL_PRE_PING", fallback=True)
+
+            log.debug(
+                "settings.prepare_engine_args(): Using pool settings. pool_size=%d, max_overflow=%d, "
+                "pool_recycle=%d, pid=%d",
+                pool_size,
+                max_overflow,
+                pool_recycle,
+                os.getpid(),
+            )
+            engine_args["pool_size"] = pool_size
+            engine_args["pool_recycle"] = pool_recycle
+            engine_args["pool_pre_ping"] = pool_pre_ping
+            engine_args["max_overflow"] = max_overflow
+
+    def _apply_mysql_isolation(self, engine_args: dict[str, Any]) -> None:
+        # The default isolation level for MySQL (REPEATABLE READ) can introduce inconsistencies when
+        # running multiple schedulers, as repeated queries on the same session may read from stale snapshots.
+        # 'READ COMMITTED' is the default value for PostgreSQL.
         # More information here:
-        # https://docs.sqlalchemy.org/en/14/core/pooling.html#disconnect-handling-pessimistic
-        pool_pre_ping = conf.getboolean("database", "SQL_ALCHEMY_POOL_PRE_PING", fallback=True)
+        # https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html
+        if SQL_ALCHEMY_CONN.startswith("mysql"):
+            engine_args["isolation_level"] = "READ COMMITTED"
 
-        log.debug(
-            "settings.prepare_engine_args(): Using pool settings. pool_size=%d, max_overflow=%d, "
-            "pool_recycle=%d, pid=%d",
-            pool_size,
-            max_overflow,
-            pool_recycle,
-            os.getpid(),
-        )
-        engine_args["pool_size"] = pool_size
-        engine_args["pool_recycle"] = pool_recycle
-        engine_args["pool_pre_ping"] = pool_pre_ping
-        engine_args["max_overflow"] = max_overflow
+    def build(self) -> dict[str, Any]:
+        engine_args = self._dialect_defaults()
+        self._apply_pool_policy(engine_args)
+        self._apply_mysql_isolation(engine_args)
+        return engine_args
 
-    # The default isolation level for MySQL (REPEATABLE READ) can introduce inconsistencies when
-    # running multiple schedulers, as repeated queries on the same session may read from stale snapshots.
-    # 'READ COMMITTED' is the default value for PostgreSQL.
-    # More information here:
-    # https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html
-    if SQL_ALCHEMY_CONN.startswith("mysql"):
-        engine_args["isolation_level"] = "READ COMMITTED"
 
-    return engine_args
+def prepare_engine_args(disable_connection_pool=False, pool_class=None):
+    """Prepare SQLAlchemy engine args."""
+    return EngineArgsBuilder(disable_connection_pool, pool_class).build()
 
 
 def dispose_orm(do_log: bool = True):
