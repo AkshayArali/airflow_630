@@ -267,3 +267,63 @@ def test_db_disabled_session_null_object_fails_consistently():
         DBDisabledSession.remove()
     with pytest.raises(AirflowInternalRuntimeError, match="_AIRFLOW_SKIP_DB_TESTS"):
         DBDisabledSession()
+
+
+@pytest.mark.non_db_test_override
+class TestDatabaseDialect:
+    """Tests for the DatabaseDialect Strategy family."""
+
+    def test_for_uri_returns_sqlite_dialect(self):
+        from airflow.settings import DatabaseDialect, SQLiteDialect
+
+        assert isinstance(DatabaseDialect.for_uri("sqlite:////tmp/airflow.db"), SQLiteDialect)
+
+    def test_for_uri_returns_postgresql_dialect(self):
+        from airflow.settings import DatabaseDialect, PostgreSQLDialect
+
+        assert isinstance(DatabaseDialect.for_uri("postgresql+psycopg2://user:pw@host/db"), PostgreSQLDialect)
+
+    def test_for_uri_returns_mysql_dialect(self):
+        from airflow.settings import DatabaseDialect, MySQLDialect
+
+        assert isinstance(DatabaseDialect.for_uri("mysql+mysqldb://user:pw@host/db"), MySQLDialect)
+
+    def test_for_uri_returns_generic_for_unknown(self):
+        from airflow.settings import DatabaseDialect, GenericDialect
+
+        assert isinstance(DatabaseDialect.for_uri("duckdb:///some.db"), GenericDialect)
+
+    def test_sqlite_is_path_relative_true(self):
+        from airflow.settings import SQLiteDialect
+
+        assert SQLiteDialect().is_path_relative("sqlite:///relative.db") is True
+
+    def test_sqlite_is_path_relative_false_for_absolute(self):
+        from airflow.settings import SQLiteDialect
+
+        assert SQLiteDialect().is_path_relative("sqlite:////tmp/absolute.db") is False
+
+    def test_sqlite_is_path_relative_false_for_memory(self):
+        from airflow.settings import SQLiteDialect
+
+        assert SQLiteDialect().is_path_relative("sqlite://") is False
+
+    def test_sqlite_no_pool_settings(self):
+        from airflow.settings import SQLiteDialect
+
+        assert SQLiteDialect.supports_pool_settings is False
+
+    def test_postgresql_has_async_driver(self):
+        from airflow.settings import PostgreSQLDialect
+
+        assert PostgreSQLDialect.async_driver == "asyncpg"
+
+    def test_mysql_isolation_level(self):
+        from airflow.settings import MySQLDialect
+
+        assert MySQLDialect.isolation_level == "READ COMMITTED"
+
+    def test_mysql_async_driver(self):
+        from airflow.settings import MySQLDialect
+
+        assert MySQLDialect.async_driver == "aiomysql"

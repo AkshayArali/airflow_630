@@ -247,6 +247,104 @@ def load_policy_plugins(pm: pluggy.PluginManager):
     pm.load_setuptools_entrypoints("airflow.policy")
 
 
+class DatabaseDialect:
+    """
+    Strategy base class for DB dialect-specific behavior.
+
+    Use ``DatabaseDialect.for_uri(conn_str)`` to obtain the right instance.
+    Subclasses override class variables and methods per dialect.
+    """
+
+    async_driver: str | None = None
+    supports_pool_settings: bool = True
+    isolation_level: str | None = None
+
+    def is_path_relative(self, uri: str) -> bool:
+        return False
+
+    def get_default_engine_args(self) -> dict[str, Any]:
+        return {}
+
+    def configure_adapters(self, pendulum_cls: type) -> None:
+        pass
+
+    @classmethod
+    def for_uri(cls, uri: str) -> DatabaseDialect:
+        """Return the dialect instance matching the SQLAlchemy URI scheme."""
+        if uri.startswith("sqlite"):
+            return SQLiteDialect()
+        if uri.startswith("postgresql"):
+            return PostgreSQLDialect()
+        if uri.startswith("mysql"):
+            return MySQLDialect()
+        return GenericDialect()
+
+
+class SQLiteDialect(DatabaseDialect):
+    """Dialect strategy for SQLite."""
+
+    async_driver = "aiosqlite"
+    supports_pool_settings = False
+
+    def is_path_relative(self, uri: str) -> bool:
+        if not uri or uri == "sqlite://":
+            return False
+        abs_prefix = "sqlite:///"
+        if uri.startswith(abs_prefix) and os.path.isabs(uri[len(abs_prefix) :]):
+            return False
+        return True
+
+    def configure_adapters(self, pendulum_cls: type) -> None:
+        from sqlite3 import register_adapter
+
+        register_adapter(pendulum_cls, lambda val: val.isoformat(" "))
+
+
+class PostgreSQLDialect(DatabaseDialect):
+    """Dialect strategy for PostgreSQL."""
+
+    async_driver = "asyncpg"
+
+    def get_default_engine_args(self) -> dict[str, Any]:
+        return {"insertmanyvalues_page_size": 10000} | (
+            {}
+            if _USE_PSYCOPG3
+            else {"executemany_mode": "values_plus_batch", "executemany_batch_page_size": 2000}
+        )
+
+
+class MySQLDialect(DatabaseDialect):
+    """Dialect strategy for MySQL."""
+
+    async_driver = "aiomysql"
+    isolation_level = "READ COMMITTED"
+
+    def configure_adapters(self, pendulum_cls: type) -> None:
+        try:
+            try:
+                import MySQLdb.converters
+            except ImportError:
+                raise RuntimeError(
+                    "You do not have `mysqlclient` package installed. "
+                    "Please install it with `pip install mysqlclient` and make sure you have system "
+                    "mysql libraries installed, as well as `pkg-config` system package "
+                    "installed in case you see compilation error during installation."
+                )
+            MySQLdb.converters.conversions[pendulum_cls] = MySQLdb.converters.DateTime2literal
+        except ImportError:
+            pass
+        try:
+            import pymysql.converters
+
+            pymysql.converters.conversions[pendulum_cls] = pymysql.converters.escape_datetime
+        except ImportError:
+            pass
+
+
+class GenericDialect(DatabaseDialect):
+    """Passthrough dialect for unrecognized URI schemes."""
+
+
 # Primary SQL dialect (before any sync driver suffix, e.g. ``postgresql`` from
 # ``postgresql+psycopg2``) to the async driver Airflow uses when
 # ``sql_alchemy_conn_async`` is not set.
@@ -360,21 +458,9 @@ SkipDBTestsSession = DBDisabledSession
 
 def _is_sqlite_db_path_relative(sqla_conn_str: str) -> bool:
     """Determine whether the database connection URI specifies a relative path."""
-    # Check for non-empty connection string:
     if not sqla_conn_str:
         return False
-    # Check for the right URI scheme:
-    if not sqla_conn_str.startswith("sqlite"):
-        return False
-    # In-memory is not useful for production, but useful for writing tests against Airflow for extensions
-    if sqla_conn_str == "sqlite://":
-        return False
-    # Check for absolute path:
-    if sqla_conn_str.startswith(abs_prefix := "sqlite:///") and os.path.isabs(
-        sqla_conn_str[len(abs_prefix) :]
-    ):
-        return False
-    return True
+    return DatabaseDialect.for_uri(sqla_conn_str).is_path_relative(sqla_conn_str)
 
 
 def _get_connect_args(mode: Literal["sync", "async"]) -> Any:
@@ -486,39 +572,23 @@ def configure_orm(disable_connection_pool=False, pool_class=None):
 class EngineArgsBuilder:
     """Builder for SQLAlchemy engine kwargs (incremental, dialect-specific steps)."""
 
-    _DEFAULT_ENGINE_ARGS: dict[str, dict[str, Any]] = {
-        "postgresql": (
-            {
-                "insertmanyvalues_page_size": 10000,
-            }
-            | (
-                {}
-                if _USE_PSYCOPG3
-                else {"executemany_mode": "values_plus_batch", "executemany_batch_page_size": 2000}
-            )
-        )
-    }
-
     def __init__(self, disable_connection_pool: bool = False, pool_class: Any = None) -> None:
         self._disable_connection_pool = disable_connection_pool
         self._pool_class = pool_class
 
     def _dialect_defaults(self) -> dict[str, Any]:
-        default_args: dict[str, Any] = {}
-        for dialect, default in self._DEFAULT_ENGINE_ARGS.items():
-            if SQL_ALCHEMY_CONN.startswith(dialect):
-                default_args = default.copy()
-                break
-        return conf.getjson("database", "sql_alchemy_engine_args", fallback=default_args)
+        dialect = DatabaseDialect.for_uri(SQL_ALCHEMY_CONN)
+        return conf.getjson("database", "sql_alchemy_engine_args", fallback=dialect.get_default_engine_args())
 
     def _apply_pool_policy(self, engine_args: dict[str, Any]) -> None:
+        dialect = DatabaseDialect.for_uri(SQL_ALCHEMY_CONN)
         if self._pool_class:
             # Don't use separate settings for size etc, only those from sql_alchemy_engine_args
             engine_args["poolclass"] = self._pool_class
         elif self._disable_connection_pool or not conf.getboolean("database", "SQL_ALCHEMY_POOL_ENABLED"):
             engine_args["poolclass"] = NullPool
             log.debug("settings.prepare_engine_args(): Using NullPool")
-        elif not SQL_ALCHEMY_CONN.startswith("sqlite"):
+        elif dialect.supports_pool_settings:
             # Pool size engine args not supported by sqlite.
             # If no config value is defined for the pool size, select a reasonable value.
             # 0 means no limit, which could lead to exceeding the Database connection limit.
@@ -568,8 +638,9 @@ class EngineArgsBuilder:
         # 'READ COMMITTED' is the default value for PostgreSQL.
         # More information here:
         # https://dev.mysql.com/doc/refman/8.0/en/innodb-transaction-isolation-levels.html
-        if SQL_ALCHEMY_CONN.startswith("mysql"):
-            engine_args["isolation_level"] = "READ COMMITTED"
+        isolation = DatabaseDialect.for_uri(SQL_ALCHEMY_CONN).isolation_level
+        if isolation:
+            engine_args["isolation_level"] = isolation
 
     def build(self) -> dict[str, Any]:
         engine_args = self._dialect_defaults()
@@ -617,32 +688,7 @@ def configure_adapters():
     """Register Adapters and DB Converters."""
     from pendulum import DateTime as Pendulum
 
-    if SQL_ALCHEMY_CONN.startswith("sqlite"):
-        from sqlite3 import register_adapter
-
-        register_adapter(Pendulum, lambda val: val.isoformat(" "))
-
-    if SQL_ALCHEMY_CONN.startswith("mysql"):
-        try:
-            try:
-                import MySQLdb.converters
-            except ImportError:
-                raise RuntimeError(
-                    "You do not have `mysqlclient` package installed. "
-                    "Please install it with `pip install mysqlclient` and make sure you have system "
-                    "mysql libraries installed, as well as well as `pkg-config` system package "
-                    "installed in case you see compilation error during installation."
-                )
-
-            MySQLdb.converters.conversions[Pendulum] = MySQLdb.converters.DateTime2literal
-        except ImportError:
-            pass
-        try:
-            import pymysql.converters
-
-            pymysql.converters.conversions[Pendulum] = pymysql.converters.escape_datetime
-        except ImportError:
-            pass
+    DatabaseDialect.for_uri(SQL_ALCHEMY_CONN).configure_adapters(Pendulum)
 
 
 def _configure_secrets_masker():
