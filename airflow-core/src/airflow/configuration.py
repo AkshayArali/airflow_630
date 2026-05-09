@@ -66,6 +66,9 @@ ConfigOptionsDictType = dict[str, ConfigType]
 ConfigSectionSourcesType = dict[str, str | tuple[str, str]]
 ConfigSourcesType = dict[str, ConfigSectionSourcesType]
 
+# Type alias for config validators: zero-argument callables that raise on invalid config.
+ConfigValidator = Callable[[], None]
+
 ENV_VAR_PREFIX = "AIRFLOW__"
 
 _DEPRECATED_LOG_FILENAME_TEMPLATE_LEGACY = (
@@ -358,14 +361,18 @@ class AirflowConfigParser(_SharedAirflowConfigParser):
         self._providers_configuration_loaded = False
 
     @property
-    def _validators(self) -> list[Callable[[], None]]:
-        """Overring _validators from shared base class to add core-specific validators."""
+    def _validators(self) -> list[ConfigValidator]:
+        """Override _validators from shared base class with core-specific pure validators."""
         return [
             self._validate_sqlite3_version,
             self._validate_enums,
             self._validate_deprecated_values,
-            self._upgrade_postgres_metastore_conn,
         ]
+
+    def validate(self) -> None:
+        """Run validators then apply post-validation config migrations."""
+        super().validate()
+        self._upgrade_postgres_metastore_conn()
 
     @property
     def _lookup_sequence(self) -> list[Callable]:

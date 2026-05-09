@@ -2082,3 +2082,22 @@ def test_airflow_config_parser_unpickle_avoids_rerunning_init(monkeypatch: pytes
     roundtrip = pickle.loads(pickle.dumps(parser))
     assert init_count == 1
     assert isinstance(roundtrip, AirflowConfigParser)
+
+
+def test_validators_list_contains_only_pure_validators():
+    """_validators must not contain _upgrade_postgres_metastore_conn (a mutator, not a validator)."""
+    from airflow.configuration import conf
+
+    validator_names = [v.__name__ for v in conf._validators]
+    assert "_upgrade_postgres_metastore_conn" not in validator_names
+
+
+def test_validate_still_calls_upgrade_postgres_metastore_conn():
+    """validate() must still invoke _upgrade_postgres_metastore_conn after the refactor."""
+    from unittest.mock import patch
+
+    from airflow.configuration import AirflowConfigParser, conf
+
+    with patch.object(AirflowConfigParser, "_upgrade_postgres_metastore_conn") as mock_upgrade:
+        conf.validate()
+    mock_upgrade.assert_called_once()
