@@ -30,7 +30,7 @@ import os
 from argparse import Action
 from collections import Counter
 from collections.abc import Iterable
-from functools import cache
+from functools import cache, singledispatch
 from typing import TYPE_CHECKING
 
 import lazy_object_proxy
@@ -275,6 +275,26 @@ def _sort_args(args: Iterable[Arg]) -> Iterable[Arg]:
     yield from sorted(optional, key=lambda x: get_long_option(x).lower())
 
 
+@singledispatch
+def _configure_command(sub: object, sub_proc: argparse.ArgumentParser) -> None:
+    raise AirflowException("Invalid command definition.")
+
+
+@_configure_command.register(ActionCommand)
+def _(sub: ActionCommand, sub_proc: argparse.ArgumentParser) -> None:
+    for arg in _sort_args(sub.args):
+        arg.add_to_parser(sub_proc)
+    sub_proc.set_defaults(func=sub.func)
+
+
+@_configure_command.register(GroupCommand)
+def _(sub: GroupCommand, sub_proc: argparse.ArgumentParser) -> None:
+    sub_subparsers = sub_proc.add_subparsers(dest="subcommand", metavar="COMMAND")
+    sub_subparsers.required = True
+    for command in sorted(sub.subcommands, key=lambda x: x.name):
+        _add_command(sub_subparsers, command)
+
+
 def _add_command(subparsers: argparse._SubParsersAction, sub: CLICommand) -> None:
     if isinstance(sub, ActionCommand) and sub.hide:
         sub_proc = subparsers.add_parser(sub.name, epilog=sub.epilog)
@@ -283,24 +303,4 @@ def _add_command(subparsers: argparse._SubParsersAction, sub: CLICommand) -> Non
             sub.name, help=sub.help, description=sub.description or sub.help, epilog=sub.epilog
         )
     sub_proc.formatter_class = LazyRichHelpFormatter
-
-    if isinstance(sub, GroupCommand):
-        _add_group_command(sub, sub_proc)
-    elif isinstance(sub, ActionCommand):
-        _add_action_command(sub, sub_proc)
-    else:
-        raise AirflowException("Invalid command definition.")
-
-
-def _add_action_command(sub: ActionCommand, sub_proc: argparse.ArgumentParser) -> None:
-    for arg in _sort_args(sub.args):
-        arg.add_to_parser(sub_proc)
-    sub_proc.set_defaults(func=sub.func)
-
-
-def _add_group_command(sub: GroupCommand, sub_proc: argparse.ArgumentParser) -> None:
-    subcommands = sub.subcommands
-    sub_subparsers = sub_proc.add_subparsers(dest="subcommand", metavar="COMMAND")
-    sub_subparsers.required = True
-    for command in sorted(subcommands, key=lambda x: x.name):
-        _add_command(sub_subparsers, command)
+    _configure_command(sub, sub_proc)
