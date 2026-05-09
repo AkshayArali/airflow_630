@@ -257,3 +257,13 @@ class TestAsyncConnUriFromSync:
 
         with pytest.raises(AirflowConfigException):
             _get_async_conn_uri_from_sync("not a valid sqlalchemy url%%%")
+
+
+def test_db_disabled_session_null_object_fails_consistently():
+    from airflow.exceptions import AirflowInternalRuntimeError
+    from airflow.settings import DBDisabledSession
+
+    with pytest.raises(AirflowInternalRuntimeError, match="_AIRFLOW_SKIP_DB_TESTS"):
+        DBDisabledSession.remove()
+    with pytest.raises(AirflowInternalRuntimeError, match="_AIRFLOW_SKIP_DB_TESTS"):
+        DBDisabledSession()
