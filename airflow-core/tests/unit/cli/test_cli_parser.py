@@ -607,6 +607,35 @@ class TestCli:
                 action_cmd.name, help=action_cmd.help, description=action_cmd.help, epilog=action_cmd.epilog
             )
 
+    @pytest.mark.non_db_test_override
+    def test_wrap_loader_catches_outer_exception(self):
+        """_wrap_loader must log a warning and not re-raise on outer failure."""
+
+        def bad_loader():
+            raise ImportError("boom")
+
+        with patch.object(cli_parser.log, "warning") as mock_warn:
+            cli_parser._wrap_loader("test-component", bad_loader)
+        mock_warn.assert_called_once()
+        assert "test-component" in mock_warn.call_args[0][1]
+
+    @pytest.mark.non_db_test_override
+    def test_try_extend_commands_catches_inner_exception(self):
+        """_try_extend_commands must log exception+error and not re-raise."""
+
+        def bad_fn():
+            raise ImportError("inner failure")
+
+        original_len = len(cli_parser.airflow_commands)
+        with (
+            patch.object(cli_parser.log, "exception") as mock_exc,
+            patch.object(cli_parser.log, "error") as mock_err,
+        ):
+            cli_parser._try_extend_commands(bad_fn, "test-thing")
+        assert len(cli_parser.airflow_commands) == original_len
+        mock_exc.assert_called_once()
+        mock_err.assert_called_once()
+
 
 # We need to run it from sources with PYTHONPATH, not command line tool,
 # because we need to make sure that we have providers configured from source provider.yaml files
