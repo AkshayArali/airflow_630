@@ -26,6 +26,6 @@
     "workspaceFolder": "/opt/airflow",
     // for users who use non-standard git config patterns
     // https://github.com/microsoft/vscode-remote-release/issues/2084#issuecomment-989756268
-    "initializeCommand": "cd \"${localWorkspaceFolder}\" && git config --local user.email \"$(git config user.email)\" && git config --local user.name \"$(git config user.name)\"",
+    "initializeCommand": "cd \"${localWorkspaceFolder}\" && (email=$(git config user.email 2>/dev/null) && [ -n \"$email\" ] && git config --local user.email \"$email\" || true) && (name=$(git config user.name 2>/dev/null) && [ -n \"$name\" ] && git config --local user.name \"$name\" || true)",
     "overrideCommand": true
 }
